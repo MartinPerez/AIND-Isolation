@@ -6,7 +6,7 @@ augment the test suite with your own test cases to further test your code.
 You must test your agent's strength against a set of agents with known
 relative strength using tournament.py and include the results in your report.
 """
-import random
+from itertools import izip
 
 
 class Timeout(Exception):
@@ -36,9 +36,15 @@ def custom_score(game, player):
     float
         The heuristic value of the current game state to the specified player.
     """
+    if game.is_loser(player):
+        return float("-inf")
 
-    # TODO: finish this function!
-    raise NotImplementedError
+    if game.is_winner(player):
+        return float("inf")
+
+    own_moves = len(game.get_legal_moves(player))
+    opp_moves = len(game.get_legal_moves(game.get_opponent(player)))
+    return float(own_moves - opp_moves)
 
 
 class CustomPlayer:
@@ -115,31 +121,38 @@ class CustomPlayer:
             Board coordinates corresponding to a legal move; may return
             (-1, -1) if there are no available legal moves.
         """
-
         self.time_left = time_left
 
-        # TODO: finish this function!
-
-        # Perform any required initializations, including selecting an initial
-        # move from the game board (i.e., an opening book), or returning
-        # immediately if there are no legal moves
+        if not legal_moves:
+            return (-1, -1)
+        # Dummy action in case of catastrophic (no move decision made) timeout
+        self.my_move = legal_moves[0]
 
         try:
-            # The search method call (alpha beta or minimax) should happen in
-            # here in order to avoid timeout. The try/except block will
-            # automatically catch the exception raised by the search method
-            # when the timer gets close to expiring
-            pass
+            if self.method == 'minimax':
+                method = self.minimax
+            elif self.method == 'alphabeta':
+                method = self.alphabeta
+            else:
+                raise Exception('Method %s not implemented' % self.method)
+
+            # Apply iterative deepening or or limit search by search_depth
+            if self.iterative:
+                depth = 1
+                while True:
+                    self.my_move = method(game, depth)[1]
+                    depth += 1
+            else:
+                return method(game, self.search_depth)[1]
 
         except Timeout:
             # Handle any actions required at timeout, if necessary
-            pass
-
-        # Return the best move from the last completed search iteration
-        raise NotImplementedError
+            return self.my_move
 
     def minimax(self, game, depth, maximizing_player=True):
         """Implement the minimax search algorithm as described in the lectures.
+
+        Work with generators to optimize memory management (driven by depth)
 
         Parameters
         ----------
@@ -162,20 +175,38 @@ class CustomPlayer:
 
         tuple(int, int)
             The best move for the current branch; (-1, -1) for no legal moves
-
-        Notes
-        -----
-            (1) You MUST use the `self.score()` method for board evaluation
-                to pass the project unit tests; you cannot call any other
-                evaluation function directly.
         """
         if self.time_left() < self.TIMER_THRESHOLD:
             raise Timeout()
 
-        # TODO: finish this function!
-        raise NotImplementedError
+        # We get the legal moves for the current playing player
+        legal_moves = game.get_legal_moves()
+        if not legal_moves:
+            return game.utility(self), (-1, -1)
 
-    def alphabeta(self, game, depth, alpha=float("-inf"), beta=float("inf"), maximizing_player=True):
+        # Get forecast of legal moves
+        forecast = (game.forecast_move(move) for move in legal_moves)
+
+        # We recursively search until reaching desired depth
+        if depth > 1:
+            search_results = (self.minimax(
+                game, depth - 1, not maximizing_player) for game in forecast)
+        else:
+            search_results = ((self.score(game, self), move) for
+                              game, move in izip(forecast, legal_moves))
+
+        # optimize according to player and return score and move
+        if maximizing_player:
+            index, result = max(enumerate(search_results),
+                                key=lambda x: x[1][0])
+        else:
+            index, result = min(enumerate(search_results),
+                                key=lambda x: x[1][0])
+
+        return result[0], legal_moves[index]
+
+    def alphabeta(self, game, depth, alpha=float("-inf"), beta=float("inf"),
+                  maximizing_player=True):
         """Implement minimax search with alpha-beta pruning as described in the
         lectures.
 
@@ -206,15 +237,45 @@ class CustomPlayer:
 
         tuple(int, int)
             The best move for the current branch; (-1, -1) for no legal moves
-
-        Notes
-        -----
-            (1) You MUST use the `self.score()` method for board evaluation
-                to pass the project unit tests; you cannot call any other
-                evaluation function directly.
         """
         if self.time_left() < self.TIMER_THRESHOLD:
             raise Timeout()
 
-        # TODO: finish this function!
-        raise NotImplementedError
+        # We get the legal moves for the current playing player
+        legal_moves = game.get_legal_moves()
+        if not legal_moves:
+            return game.utility(self), (-1, -1)
+
+        # Get forecast of legal moves
+        forecast = (game.forecast_move(move) for move in legal_moves)
+
+        # We recursively search until reaching desired depth
+        if depth > 1:
+            search_results = (
+                self.alphabeta(game, depth - 1, alpha, beta,
+                               not maximizing_player) for game in forecast)
+        else:
+            search_results = ((self.score(game, self), move) for
+                              game, move in izip(forecast, legal_moves))
+
+        # optimize according to player and perform alpha/beta pruning
+        if maximizing_player:
+            best_score = float("-inf")
+            for index, result in enumerate(search_results):
+                if result[0] >= best_score:
+                    best_score = result[0]
+                    best_move = legal_moves[index]
+                alpha = max(alpha, best_score)
+                if best_score >= beta:
+                    return best_score, best_move
+            return best_score, best_move
+        else:
+            best_score = float("inf")
+            for index, result in enumerate(search_results):
+                if result[0] <= best_score:
+                    best_score = result[0]
+                    best_move = legal_moves[index]
+                beta = min(beta, best_score)
+                if best_score <= alpha:
+                    return best_score, best_move
+            return best_score, best_move
