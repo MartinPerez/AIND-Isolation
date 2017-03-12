@@ -6,7 +6,9 @@ augment the test suite with your own test cases to further test your code.
 You must test your agent's strength against a set of agents with known
 relative strength using tournament.py and include the results in your report.
 """
-from itertools import izip
+from isolation import Board
+from copy import deepcopy
+from copy import copy
 
 
 class Timeout(Exception):
@@ -42,9 +44,33 @@ def custom_score(game, player):
     if game.is_winner(player):
         return float("inf")
 
-    own_moves = len(game.get_legal_moves(player))
-    opp_moves = len(game.get_legal_moves(game.get_opponent(player)))
-    return float(own_moves - opp_moves)
+    mc_factor = game.move_count * 0.2
+    weights = [1., -2.0, None, -0.5]
+    total_score = 0.
+    # own_move_score (rescaled from 0 to 1)
+    if weights[0] is not None:
+        own_move = float(len(game.get_legal_moves(player)))
+        total_score += weights[0] * own_move / 8.
+    # opp_move_score (rescaled from 0 to 1)
+    if weights[1] is not None:
+        opp_move = float(len(game.get_legal_moves(game.get_opponent(player))))
+        total_score += weights[1] * opp_move / 8.
+    # fight_or_flight (rescaled from 0 to 1)
+    if weights[2] is not None:
+        own_loc = game.get_player_location(player)
+        opp_loc = game.get_player_location(game.get_opponent(player))
+        h1, w1 = own_loc
+        h2, w2 = opp_loc
+        jump_distance = float(player.knight_distance[h1 - h2][w1 - w2])
+        total_score += weights[2] * jump_distance / 5. / mc_factor
+    # control_center_score (rescaled from 0 to 1)
+    if weights[3] is not None:
+        own_loc = game.get_player_location(player)
+        h1, w1 = own_loc
+        control = float(player.board_position_score[h1][w1])
+        total_score += weights[3] * control / 8. / mc_factor
+
+    return total_score
 
 
 class CustomPlayer:
@@ -78,13 +104,56 @@ class CustomPlayer:
     """
 
     def __init__(self, search_depth=3, score_fn=custom_score,
-                 iterative=True, method='minimax', timeout=10.):
+                 iterative=True, method='minimax', timeout=2.):
         self.search_depth = search_depth
         self.iterative = iterative
         self.score = score_fn
         self.method = method
         self.time_left = None
         self.TIMER_THRESHOLD = timeout
+
+        # list of possible knight movements
+        self.coord_moves = [(-2, -1), (-2, 1), (2, -1), (2, 1),
+                            (-1, -2), (-1, 2), (1, -2), (1, 2)]
+        # assumed board dimensions for precomputations
+        board_width = 7
+        board_height = 7
+
+        # score board positions based on potential knight movements
+        self.board_position_score = [[0 for i in range(board_width)] for j
+                                     in range(board_height)]
+        for i in range(7):
+            for j in range(7):
+                valid_moves = 0
+                for c in self.coord_moves:
+                    if i + c[0] >= 0 and i + c[0] <= 6:
+                        if j + c[1] >= 0 and j + c[1] <= 6:
+                            valid_moves += 1
+                self.board_position_score[i][j] = valid_moves
+
+        # create matrix to get number of jumps from opponent (knight distance)
+        def fill_knight_distance(seed_dist, graph, spots):
+            new_spots = []
+            for i, j in spots:
+                moves = [(i + m[0], j + m[1]) for m in self.coord_moves]
+                for a, b in moves:
+                    if a >= -6 and a <= 6 and b >= -6 and b <= 6:
+                        if graph[a][b] is None:
+                            graph[a][b] = seed_dist + 1
+                            new_spots.append((a, b))
+            if new_spots:
+                fill_knight_distance(seed_dist + 1, graph, new_spots)
+
+        rows = range(-board_width + 1, board_width)
+        cols = range(-board_width + 1, board_height)
+        self.knight_distance = [[None for i in rows] for j in cols]
+        self.knight_distance[0][0] = 0
+        fill_knight_distance(0, self.knight_distance, [(0, 0)])
+
+        # Extras
+        self.my_score = None
+        self.explored_depth = None
+        self.explored_nodes = None
 
     def get_move(self, game, legal_moves, time_left):
         """Search for the best move from the available legal moves and return a
@@ -125,8 +194,9 @@ class CustomPlayer:
 
         if not legal_moves:
             return (-1, -1)
-        # Dummy action in case of catastrophic (no move decision made) timeout
-        self.my_move = legal_moves[0]
+
+        # Own board implementation to avoid computation intensive forecasting
+        game = EfficientBoard(game)
 
         try:
             if self.method == 'minimax':
@@ -139,11 +209,20 @@ class CustomPlayer:
             # Apply iterative deepening or or limit search by search_depth
             if self.iterative:
                 depth = 1
+                self.explored_depth = 0
+                self.explored_nodes = 0
                 while True:
-                    self.my_move = method(game, depth)[1]
+                    self.my_score, self.my_move = method(game, depth)
+                    self.explored_depth = depth
+                    if (self.my_score == float('inf') or
+                            self.my_score == float('-inf')):
+                        return self.my_move
                     depth += 1
             else:
-                return method(game, self.search_depth)[1]
+                self.explored_depth = self.search_depth
+                self.explored_nodes = 0
+                self.my_score, self.my_move = method(game, self.search_depth)
+                return self.my_move
 
         except Timeout:
             # Handle any actions required at timeout, if necessary
@@ -176,34 +255,56 @@ class CustomPlayer:
         tuple(int, int)
             The best move for the current branch; (-1, -1) for no legal moves
         """
-        if self.time_left() < self.TIMER_THRESHOLD:
-            raise Timeout()
-
         # We get the legal moves for the current playing player
         legal_moves = game.get_legal_moves()
+
+        # The player with no available moves lost (encountered terminal node)
         if not legal_moves:
-            return game.utility(self), (-1, -1)
+            if maximizing_player:
+                score = float('-inf')
+            else:
+                score = float('inf')
+            return score, (-1, -1)
 
-        # Get forecast of legal moves
-        forecast = (game.forecast_move(move) for move in legal_moves)
-
-        # We recursively search until reaching desired depth
-        if depth > 1:
-            search_results = (self.minimax(
-                game, depth - 1, not maximizing_player) for game in forecast)
-        else:
-            search_results = ((self.score(game, self), move) for
-                              game, move in izip(forecast, legal_moves))
-
-        # optimize according to player and return score and move
+        # Initialize score and move values for the algorithm
         if maximizing_player:
-            index, result = max(enumerate(search_results),
-                                key=lambda x: x[1][0])
+            best_score = float('-inf')
+            best_move = legal_moves[0]
         else:
-            index, result = min(enumerate(search_results),
-                                key=lambda x: x[1][0])
+            best_score = float('inf')
+            best_move = legal_moves[0]
 
-        return result[0], legal_moves[index]
+        # each move is a new node to explore in the tree search
+        for move in legal_moves:
+            if self.time_left() < self.TIMER_THRESHOLD:
+                raise Timeout()
+            self.explored_nodes += 1
+
+            # apply move to explore next node
+            game.apply_move(move)
+
+            # As long as we dont reach the last desired depth we expand
+            # the search tree on depth first basis
+            if depth > 1:
+                score, next_move = self.minimax(
+                    game, depth - 1, not maximizing_player)
+            else:
+                score = self.score(game, self)
+
+            # score optimization
+            if maximizing_player:
+                if score > best_score:
+                    best_score = score
+                    best_move = move
+            else:
+                if score < best_score:
+                    best_score = score
+                    best_move = move
+
+            # Revert the game to its previous state to continue the search
+            game.undo_move()
+
+        return best_score, best_move
 
     def alphabeta(self, game, depth, alpha=float("-inf"), beta=float("inf"),
                   maximizing_player=True):
@@ -238,44 +339,130 @@ class CustomPlayer:
         tuple(int, int)
             The best move for the current branch; (-1, -1) for no legal moves
         """
-        if self.time_left() < self.TIMER_THRESHOLD:
-            raise Timeout()
-
         # We get the legal moves for the current playing player
         legal_moves = game.get_legal_moves()
+
+        # The player with no available moves lost (encountered terminal node)
         if not legal_moves:
-            return game.utility(self), (-1, -1)
+            if maximizing_player:
+                score = float('-inf')
+            else:
+                score = float('inf')
+            return score, (-1, -1)
 
-        # Get forecast of legal moves
-        forecast = (game.forecast_move(move) for move in legal_moves)
-
-        # We recursively search until reaching desired depth
-        if depth > 1:
-            search_results = (
-                self.alphabeta(game, depth - 1, alpha, beta,
-                               not maximizing_player) for game in forecast)
-        else:
-            search_results = ((self.score(game, self), move) for
-                              game, move in izip(forecast, legal_moves))
-
-        # optimize according to player and perform alpha/beta pruning
+        # Initialize score and move values for the algorithm
         if maximizing_player:
-            best_score = float("-inf")
-            for index, result in enumerate(search_results):
-                if result[0] >= best_score:
-                    best_score = result[0]
-                    best_move = legal_moves[index]
-                alpha = max(alpha, best_score)
-                if best_score >= beta:
-                    return best_score, best_move
-            return best_score, best_move
+            best_score = float('-inf')
+            best_move = legal_moves[0]
         else:
-            best_score = float("inf")
-            for index, result in enumerate(search_results):
-                if result[0] <= best_score:
-                    best_score = result[0]
-                    best_move = legal_moves[index]
-                beta = min(beta, best_score)
-                if best_score <= alpha:
+            best_score = float('inf')
+            best_move = legal_moves[0]
+
+        # each move is a new node to explore in the tree search
+        for move in legal_moves:
+            if self.time_left() < self.TIMER_THRESHOLD:
+                raise Timeout()
+            self.explored_nodes += 1
+
+            # apply move to explore next node
+            game.apply_move(move)
+
+            # As long as we dont reach the last desired depth we expand
+            # the search tree on depth first basis
+            if depth > 1:
+                score, _ = self.alphabeta(
+                    game, depth - 1, alpha, beta, not maximizing_player)
+            else:
+                score = self.score(game, self)
+
+            # score optimization
+            if maximizing_player:
+                if score > best_score:
+                    best_score = score
+                    best_move = move
+                # Alpha-beta pruning
+                if best_score >= beta:
+                    game.undo_move()
                     return best_score, best_move
-            return best_score, best_move
+                alpha = max(alpha, best_score)
+            else:
+                if score < best_score:
+                    best_score = score
+                    best_move = move
+                # Alpha-beta pruning
+                if best_score <= alpha:
+                    game.undo_move()
+                    return best_score, best_move
+                beta = min(beta, best_score)
+
+            # Revert the game to its previous state to continue the search
+            game.undo_move()
+
+        return best_score, best_move
+
+
+class EfficientBoard(Board):
+
+    def __init__(self, board):
+        Board.__init__(self, board.__player_1__, board.__player_2__,
+                       board.width, board.height)
+        self.move_count = board.move_count
+        self.__active_player__ = board.__active_player__
+        self.__inactive_player__ = board.__inactive_player__
+        self.__last_player_move__ = copy(board.__last_player_move__)
+        self.__player_symbols__ = copy(board.__player_symbols__)
+        self.__board_state__ = deepcopy(board.__board_state__)
+        # We also add a move history to tackle reversions and access the
+        # history if desired from the board
+        self.move_history = [self.__last_player_move__[self.__active_player__],
+                             self.__last_player_move__[self.__inactive_player__]]
+
+    def apply_move(self, move):
+        """
+        Move the active player to a specified location.
+
+        Parameters
+        ----------
+        move : (int, int)
+            A coordinate pair (row, column) indicating the next position for
+            the active player on the board.
+
+        Returns
+        ----------
+        None
+        """
+        row, col = move
+        self.__last_player_move__[self.active_player] = move
+        self.__board_state__[row][col] = self.__player_symbols__[self.active_player]
+        self.__active_player__, self.__inactive_player__ = self.__inactive_player__, self.__active_player__
+        self.move_count += 1
+        # We also append move to move_history
+        # only difference with original method
+        self.move_history.append(move)
+
+    def undo_move(self):
+        """
+        Undo last player move
+
+        Parameters
+        ----------
+
+        Returns
+        ----------
+        None
+        """
+        # Empty position of the move
+        current_move = self.move_history[-1]
+        row, col = current_move
+        self.__board_state__[row][col] = Board.BLANK
+
+        # Assign player to its previous position
+        previous_move = self.move_history[-3]
+        self.__last_player_move__[self.inactive_player] = previous_move
+        row, col = previous_move
+        self.__board_state__[row][col] = self.__player_symbols__[self.inactive_player]
+
+        # delete last traces of move
+        self.__active_player__, self.__inactive_player__ = self.__inactive_player__, self.__active_player__
+        self.move_count -= 1
+        del self.move_history[-1]
