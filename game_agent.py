@@ -16,6 +16,23 @@ class Timeout(Exception):
     pass
 
 
+def second_order_improved_score(game, player):
+    if game.is_loser(player):
+        return float("-inf")
+
+    if game.is_winner(player):
+        return float("inf")
+
+    n_moves = 0
+    opp_moves = len(game.get_legal_moves(game.get_opponent(player)))
+    for move in game.get_legal_moves(player):
+        n_moves += 1
+        game.apply_move(move)
+        n_moves += len(game.get_legal_moves(player))
+        game.undo_move()
+    return float(n_moves) / 8. + float(opp_moves)
+
+
 def custom_score(game, player):
     """Calculate the heuristic value of a game state from the point of view
     of the given player.
@@ -45,7 +62,7 @@ def custom_score(game, player):
         return float("inf")
 
     mc_factor = game.move_count * 0.2
-    weights = [1., -2.0, None, -0.5]
+    weights = [1., -2.0, None, None]
     total_score = 0.
     # own_move_score (rescaled from 0 to 1)
     if weights[0] is not None:
@@ -104,7 +121,7 @@ class CustomPlayer:
     """
 
     def __init__(self, search_depth=3, score_fn=custom_score,
-                 iterative=True, method='minimax', timeout=2.):
+                 iterative=True, method='minimax', timeout=5.):
         self.search_depth = search_depth
         self.iterative = iterative
         self.score = score_fn
@@ -150,11 +167,6 @@ class CustomPlayer:
         self.knight_distance[0][0] = 0
         fill_knight_distance(0, self.knight_distance, [(0, 0)])
 
-        # Extras
-        self.my_score = None
-        self.explored_depth = None
-        self.explored_nodes = None
-
     def get_move(self, game, legal_moves, time_left):
         """Search for the best move from the available legal moves and return a
         result before the time limit expires.
@@ -195,8 +207,9 @@ class CustomPlayer:
         if not legal_moves:
             return (-1, -1)
 
+        # Uncomment to improve board efficiency
         # Own board implementation to avoid computation intensive forecasting
-        game = EfficientBoard(game)
+        # game = EfficientBoard(game)
 
         try:
             if self.method == 'minimax':
@@ -209,8 +222,6 @@ class CustomPlayer:
             # Apply iterative deepening or or limit search by search_depth
             if self.iterative:
                 depth = 1
-                self.explored_depth = 0
-                self.explored_nodes = 0
                 while True:
                     self.my_score, self.my_move = method(game, depth)
                     self.explored_depth = depth
@@ -219,8 +230,6 @@ class CustomPlayer:
                         return self.my_move
                     depth += 1
             else:
-                self.explored_depth = self.search_depth
-                self.explored_nodes = 0
                 self.my_score, self.my_move = method(game, self.search_depth)
                 return self.my_move
 
@@ -278,18 +287,22 @@ class CustomPlayer:
         for move in legal_moves:
             if self.time_left() < self.TIMER_THRESHOLD:
                 raise Timeout()
-            self.explored_nodes += 1
 
+            # Uncomment to improve board efficiency
             # apply move to explore next node
-            game.apply_move(move)
+            # game.apply_move(move)
+            # next_game = game
+
+            # Comment this line to improve board efficiency
+            next_game = game.forecast_move(move)
 
             # As long as we dont reach the last desired depth we expand
             # the search tree on depth first basis
             if depth > 1:
                 score, next_move = self.minimax(
-                    game, depth - 1, not maximizing_player)
+                    next_game, depth - 1, not maximizing_player)
             else:
-                score = self.score(game, self)
+                score = self.score(next_game, self)
 
             # score optimization
             if maximizing_player:
@@ -301,8 +314,9 @@ class CustomPlayer:
                     best_score = score
                     best_move = move
 
+            # Uncomment to improve board efficiency
             # Revert the game to its previous state to continue the search
-            game.undo_move()
+            # game.undo_move()
 
         return best_score, best_move
 
@@ -362,18 +376,22 @@ class CustomPlayer:
         for move in legal_moves:
             if self.time_left() < self.TIMER_THRESHOLD:
                 raise Timeout()
-            self.explored_nodes += 1
 
+            # Uncomment to improve board efficiency
             # apply move to explore next node
-            game.apply_move(move)
+            # game.apply_move(move)
+            # next_game = game
+
+            # Comment this line to improve board efficiency
+            next_game = game.forecast_move(move)
 
             # As long as we dont reach the last desired depth we expand
             # the search tree on depth first basis
             if depth > 1:
                 score, _ = self.alphabeta(
-                    game, depth - 1, alpha, beta, not maximizing_player)
+                    next_game, depth - 1, alpha, beta, not maximizing_player)
             else:
-                score = self.score(game, self)
+                score = self.score(next_game, self)
 
             # score optimization
             if maximizing_player:
@@ -382,7 +400,8 @@ class CustomPlayer:
                     best_move = move
                 # Alpha-beta pruning
                 if best_score >= beta:
-                    game.undo_move()
+                    # Uncomment to improve board efficiency
+                    # game.undo_move()
                     return best_score, best_move
                 alpha = max(alpha, best_score)
             else:
@@ -391,12 +410,14 @@ class CustomPlayer:
                     best_move = move
                 # Alpha-beta pruning
                 if best_score <= alpha:
-                    game.undo_move()
+                    # Uncomment to improve board efficiency
+                    # game.undo_move()
                     return best_score, best_move
                 beta = min(beta, best_score)
 
+            # Uncomment to improve board efficiency
             # Revert the game to its previous state to continue the search
-            game.undo_move()
+            # game.undo_move()
 
         return best_score, best_move
 
